@@ -92,6 +92,8 @@ class PlagiarismPlugin extends GenericPlugin {
 		$managers = $roleDao->getUsersByRoleId(ROLE_ID_MANAGER, $context->getId());
 		while ($manager = $managers->next()) {
 			$notificationManager->createTrivialNotification($manager->getId(), NOTIFICATION_TYPE_ERROR, array('contents' => __('plugins.generic.plagiarism.errorMessage', array('submissionId' => $submissionid, 'errorMessage' => $message))));
+			//1 = hardcoded account for testing
+			$notificationManager->createNotification($request,1, NOTIFICATION_TYPE_ERROR,  $context->getId(), ASSOC_TYPE_ARTICLE,1,NOTIFICATION_LEVEL_TASK, array('contents' => __('plugins.generic.plagiarism.errorMessage', array('submissionId' => $submissionid, 'errorMessage' => $message))));
 		}
 		error_log('iThenticate submission '.$submissionid.' failed: '.$message);
 	}
