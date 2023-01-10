@@ -11,7 +11,69 @@
  */
 
 import('lib.pkp.classes.plugins.GenericPlugin');
+import('classes.notification.NotificationManager');
 
+class PluginNotificationManager extends NotificationManager {
+		public function getNotificationUrl($request, $notification) {
+		$url = parent::getNotificationUrl($request, $notification);
+		$dispatcher = Application::get()->getDispatcher();
+		$contextDao = Application::getContextDAO();
+		$context = $contextDao->getById($notification->getContextId());
+
+		switch ($notification->getType()) {
+			case NOTIFICATION_TYPE_EDITOR_ASSIGN:
+				assert($notification->getAssocType() == ASSOC_TYPE_SUBMISSION && is_numeric($notification->getAssocId()));
+				return $dispatcher->url($request, ROUTE_PAGE, $context->getPath(), 'workflow', 'access', $notification->getAssocId());
+			case NOTIFICATION_TYPE_COPYEDIT_ASSIGNMENT:
+			case NOTIFICATION_TYPE_LAYOUT_ASSIGNMENT:
+			case NOTIFICATION_TYPE_INDEX_ASSIGNMENT:
+				assert($notification->getAssocType() == ASSOC_TYPE_SUBMISSION && is_numeric($notification->getAssocId()));
+				return $dispatcher->url($request, ROUTE_PAGE, $context->getPath(), 'workflow', 'access', $notification->getAssocId());
+			case NOTIFICATION_TYPE_REVIEWER_COMMENT:
+				assert($notification->getAssocType() == ASSOC_TYPE_REVIEW_ASSIGNMENT && is_numeric($notification->getAssocId()));
+				$reviewAssignmentDao = DAORegistry::getDAO('ReviewAssignmentDAO'); /* @var $reviewAssignmentDao ReviewAssignmentDAO */
+				$reviewAssignment = $reviewAssignmentDao->getById($notification->getAssocId());
+				$userGroupDao = DAORegistry::getDAO('UserGroupDAO'); /* @var $userGroupDao UserGroupDAO */
+				$operation = $reviewAssignment->getStageId()==WORKFLOW_STAGE_ID_INTERNAL_REVIEW?WORKFLOW_STAGE_PATH_INTERNAL_REVIEW:WORKFLOW_STAGE_PATH_EXTERNAL_REVIEW;
+				return $dispatcher->url($request, ROUTE_PAGE, $context->getPath(), 'workflow', $operation, $reviewAssignment->getSubmissionId());
+			case NOTIFICATION_TYPE_REVIEW_ASSIGNMENT:
+			case NOTIFICATION_TYPE_REVIEW_ASSIGNMENT_UPDATED:
+				$reviewAssignmentDao = DAORegistry::getDAO('ReviewAssignmentDAO'); /* @var $reviewAssignmentDao ReviewAssignmentDAO */
+				$reviewAssignment = $reviewAssignmentDao->getById($notification->getAssocId());
+				return $dispatcher->url($request, ROUTE_PAGE, $context->getPath(), 'reviewer', 'submission', $reviewAssignment->getSubmissionId());
+			case NOTIFICATION_TYPE_NEW_ANNOUNCEMENT:
+				assert($notification->getAssocType() == ASSOC_TYPE_ANNOUNCEMENT);
+				$announcementDao = DAORegistry::getDAO('AnnouncementDAO'); /* @var $announcementDao AnnouncementDAO */
+				$announcement = $announcementDao->getById($notification->getAssocId()); /* @var $announcement Announcement */
+				$context = $contextDao->getById($announcement->getAssocId());
+				return $dispatcher->url($request, ROUTE_PAGE, $context->getPath(), 'announcement', 'view', array($notification->getAssocId()));
+			case NOTIFICATION_TYPE_CONFIGURE_PAYMENT_METHOD:
+				return __('notification.type.configurePaymentMethod');
+			case NOTIFICATION_TYPE_CONFIGURE_PLUGIN:
+				return $dispatcher->url($request, ROUTE_PAGE, $context->getPath(), 'announcement');
+			case NOTIFICATION_TYPE_PAYMENT_REQUIRED:
+				$context = $contextDao->getById($notification->getContextId());
+				Application::getPaymentManager($context);
+				assert($notification->getAssocType() == ASSOC_TYPE_QUEUED_PAYMENT);
+				$queuedPaymentDao = DAORegistry::getDAO('QueuedPaymentDAO'); /* @var $queuedPaymentDao QueuedPaymentDAO */
+				$queuedPayment = $queuedPaymentDao->getById($notification->getAssocId());
+				$context = $contextDao->getById($queuedPayment->getContextId());
+				return $dispatcher->url($request, ROUTE_PAGE, $context->getPath(), 'payment', 'pay', array($queuedPayment->getId()));
+			default:
+				$delegateResult = $this->getByDelegate(
+					$notification->getType(),
+					$notification->getAssocType(),
+					$notification->getAssocId(),
+					__FUNCTION__,
+					array($request, $notification)
+				);
+
+				if ($delegateResult) $url = $delegateResult;
+
+				return $url;
+		}
+		}
+}
 class PlagiarismPlugin extends GenericPlugin {
 	/**
 	 * @copydoc Plugin::register()
@@ -86,15 +148,15 @@ class PlagiarismPlugin extends GenericPlugin {
 		$request = Application::getRequest();
 		$context = $request->getContext();
 		import('classes.notification.NotificationManager');
-		$notificationManager = new NotificationManager();
+		$notificationManager = new PluginNotificationManager();
 		$roleDao = DAORegistry::getDAO('RoleDAO'); /* @var $roleDao RoleDAO */
 		// Get the managers.
 		$managers = $roleDao->getUsersByRoleId(ROLE_ID_MANAGER, $context->getId());
 		while ($manager = $managers->next()) {
 			$notificationManager->createTrivialNotification($manager->getId(), NOTIFICATION_TYPE_ERROR, array('contents' => __('plugins.generic.plagiarism.errorMessage', array('submissionId' => $submissionid, 'errorMessage' => $message))));
-			//1 = hardcoded account for testing
-			$notificationManager->createNotification($request,1, NOTIFICATION_TYPE_ERROR,  $context->getId(), ASSOC_TYPE_ARTICLE,1,NOTIFICATION_LEVEL_TASK, array('contents' => __('plugins.generic.plagiarism.errorMessage', array('submissionId' => $submissionid, 'errorMessage' => $message))));
 		}
+		//1 is admin. This can move inside the loop to notify all journal managers when finished.
+		$notificationManager->createNotification($request,1, NOTIFICATION_TYPE_CONFIGURE_PLUGIN, $context->getId(), null ,null,NOTIFICATION_LEVEL_TASK, array('contents' => __('plugins.generic.plagiarism.errorMessage', array('submissionId' => $submissionid, 'errorMessage' => $message))));
 		error_log('iThenticate submission '.$submissionid.' failed: '.$message);
 	}
 	
@@ -119,6 +181,12 @@ class PlagiarismPlugin extends GenericPlugin {
 		if (empty($username) || empty($password)) {
 			$username = $this->getSetting($contextId, 'ithenticateUser');
 			$password = $this->getSetting($contextId, 'ithenticatePass');
+			//the Ithenticate class has a bug that prevents it from gracefully handling how the API responds to a blank username or password
+			//Do not send the request if the creds are missing. Do generate an error message to tell the manager to configure the plugin.
+			if ($username===null || $password===null) {
+				$this->sendErrorMessage($submission->getId(), "Check that the iThenticate username/password are set in plugin settings");
+				return false;
+			}
 		}
 
 		$ithenticate = null;
